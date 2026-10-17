@@ -3,15 +3,10 @@ import re
 import datetime
 import subprocess
 import pytz
+import requests
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
-
-# Browser TLS Impersonator to bypass Cloudflare WAF
-try:
-    from curl_cffi import requests as cureq
-except ImportError:
-    import requests as cureq
 
 # Split Credentials (GitHub Secret Scanner Bypass)
 P1 = "546480239670-"
@@ -96,78 +91,120 @@ def sanitize_video(raw_file, output_file):
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return os.path.exists(output_file) and os.path.getsize(output_file) > 10000
 
-def fetch_feed_videos(username):
-    url = f"https://www.tikwm.com/api/user/posts?unique_id={username}&count=20"
+def get_user_videos(username):
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://www.tikwm.com/"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Referer": "https://www.google.com/"
     }
     
-    # Try with Chrome TLS impersonation
+    videos = []
+    
+    # Mirror 1: Urlebird Proxy Mirror (Datacenter unblocked)
     try:
-        res = cureq.get(url, headers=headers, timeout=25, impersonate="chrome120")
+        u_url = f"https://urlebird.com/user/{username}/"
+        res = requests.get(u_url, headers=headers, timeout=20)
         if res.status_code == 200:
-            data = res.json()
-            if data.get("code") == 0:
-                videos = data.get("data", {}).get("videos", [])
-                if videos:
-                    return videos
+            found = re.findall(r'/video/([^"/]+-(\d{15,22}))/', res.text)
+            for _, vid in found:
+                if vid not in [v["video_id"] for v in videos]:
+                    videos.append({"video_id": vid, "title": f"@{username} Tips"})
     except Exception as e:
-        print(f"[-] TikWM Impersonate Notice: {e}")
+        print(f"[-] Urlebird mirror notice: {e}")
 
-    # Fallback to direct TikWM post request
+    # Mirror 2: Direct TikTok Web JSON Script Pattern
+    if not videos:
+        try:
+            t_url = f"https://www.tiktok.com/@{username}"
+            resp = requests.get(t_url, headers=headers, timeout=20)
+            if resp.status_code == 200:
+                matches = re.findall(r'/video/(\d{18,20})', resp.text)
+                for vid in matches:
+                    if vid not in [v["video_id"] for v in videos]:
+                        videos.append({"video_id": vid, "title": f"@{username} Tips"})
+        except Exception as e:
+            print(f"[-] TikTok web notice: {e}")
+
+    return videos
+
+def download_video_stream(vid_id, username, output_path):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://www.tiktok.com/"
+    }
+
+    # Stream 1: TikTok Mobile App Internal CDN URL
     try:
-        res2 = cureq.post("https://www.tikwm.com/api/feed/user", data={"unique_id": username, "count": 20}, headers=headers, timeout=25, impersonate="chrome120")
-        if res2.status_code == 200:
-            data2 = res2.json()
-            if data2.get("code") == 0:
-                videos = data2.get("data", {}).get("videos", [])
-                if videos:
-                    return videos
+        api_url = f"https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/feed/?aweme_id={vid_id}"
+        m_headers = {
+            "User-Agent": "TikTok 26.2.0 rv:262018 (iPhone; iOS 14.4.2; en_US) Cronet",
+            "Accept": "application/json"
+        }
+        r = requests.get(api_url, headers=m_headers, timeout=15)
+        if r.status_code == 200:
+            aweme_list = r.json().get("aweme_list", [])
+            if aweme_list:
+                v_obj = aweme_list[0].get("video", {})
+                urls = (v_obj.get("play_addr", {}) or v_obj.get("download_addr", {})).get("url_list", [])
+                for stream_url in urls:
+                    with requests.get(stream_url, headers=headers, stream=True, timeout=60, allow_redirects=True) as s_req:
+                        if s_req.status_code == 200:
+                            with open(output_path, "wb") as f:
+                                for chunk in s_req.iter_content(chunk_size=1024*1024):
+                                    if chunk:
+                                        f.write(chunk)
+                            if os.path.exists(output_path) and os.path.getsize(output_path) > 20000:
+                                return True
     except Exception as e:
-        print(f"[-] Fallback Notice: {e}")
+        print(f"[-] Mobile CDN notice: {e}")
 
-    return []
+    # Stream 2: Rapid CDN Mirror
+    try:
+        tik_url = f"https://www.tiktok.com/@{username}/video/{vid_id}"
+        c_res = requests.post(
+            "https://capi.oak.li/",
+            json={"url": tik_url, "videoQuality": "720", "filenamePattern": "basic"},
+            headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"},
+            timeout=20
+        )
+        if c_res.status_code == 200:
+            s_url = c_res.json().get("url")
+            if s_url:
+                with requests.get(s_url, stream=True, timeout=90) as stream_req:
+                    stream_req.raise_for_status()
+                    with open(output_path, "wb") as f:
+                        for chunk in stream_req.iter_content(chunk_size=1024*1024):
+                            if chunk:
+                                f.write(chunk)
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 20000:
+                    return True
+    except Exception:
+        pass
+
+    return False
 
 def download_latest_video(account_info, uploaded_ids):
     username = account_info["username"]
-    print(f"\n[+] Scanning feed for @{username} ...")
+    print(f"\n[+] Scanning TikTok profile: @{username} ...")
 
-    videos = fetch_feed_videos(username)
+    videos = get_user_videos(username)
     if not videos:
-        print(f"[-] Could not retrieve video feed for @{username}")
+        print(f"[-] Could not find videos for @{username}")
         return None
 
     for item in videos:
         vid_id = str(item.get("video_id"))
         
-        # Strict Duplicate Prevention: Jo video pehle upload ho chuki hai, skip karo
+        # Duplicate Protection
         if not vid_id or vid_id in uploaded_ids:
             continue
-
-        video_stream_url = item.get("play")
-        if not video_stream_url:
-            continue
-        if not video_stream_url.startswith("http"):
-            video_stream_url = f"https://www.tikwm.com{video_stream_url}"
 
         raw_file = f"temp_{vid_id}.mp4"
         final_file = f"short_{vid_id}.mp4"
 
-        print(f"[+] Found fresh un-uploaded video: {vid_id} ... Downloading stream ...")
-        try:
-            r = cureq.get(video_stream_url, timeout=90, impersonate="chrome120")
-            if r.status_code == 200 and len(r.content) > 20000:
-                with open(raw_file, "wb") as f:
-                    f.write(r.content)
-            else:
-                print(f"[-] Stream download returned status: {r.status_code}")
-                continue
-        except Exception as err:
-            print(f"[-] Download stream error: {err}")
-            continue
+        print(f"[+] Found fresh un-uploaded video: {vid_id} ... Downloading ...")
+        success = download_video_stream(vid_id, username, raw_file)
 
-        if os.path.exists(raw_file) and os.path.getsize(raw_file) > 20000:
+        if success and os.path.exists(raw_file) and os.path.getsize(raw_file) > 20000:
             print("[+] Sanitizing 9:16 Shorts format via FFmpeg...")
             if sanitize_video(raw_file, final_file):
                 if os.path.exists(raw_file):
@@ -175,8 +212,8 @@ def download_latest_video(account_info, uploaded_ids):
             else:
                 final_file = raw_file
 
-            raw_title = item.get("title", "").strip() or f"{account_info['category']} Quick Tips"
-            clean_title = re.sub(r'#\S+', '', raw_title).strip() or f"{account_info['category']} Quick Tips"
+            raw_title = item.get("title", "").strip() or f"{account_info['category']} Tips"
+            clean_title = re.sub(r'#\S+', '', raw_title).strip() or f"{account_info['category']} Tips"
             final_title = f"{clean_title[:80]} #Shorts"
 
             return {
@@ -184,8 +221,10 @@ def download_latest_video(account_info, uploaded_ids):
                 "file_path": final_file,
                 "title": final_title
             }
+        else:
+            print(f"[-] Stream download failed for {vid_id}, checking next video...")
 
-    print(f"[-] All videos in feed for @{username} are already in uploaded_ids.txt.")
+    print(f"[-] All videos for @{username} are already uploaded.")
     return None
 
 def upload_to_youtube(yt, video_info, category_config):
@@ -252,7 +291,7 @@ def main():
             continue
 
         upload_to_youtube(yt, video_data, item)
-        # Kamyabi se upload hone ke baad hi ID save hogi taake duplicate na ho
+        # Upload hone ke baad hi ID save hogi taake duplicate na ho[cite: 8]
         append_uploaded_id(video_data["id"])
         uploaded_ids.add(video_data["id"])
 
