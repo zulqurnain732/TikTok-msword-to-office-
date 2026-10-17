@@ -3,7 +3,7 @@ import re
 import datetime
 import subprocess
 import pytz
-import yt_dlp
+import requests
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
@@ -18,7 +18,7 @@ S1 = "GOCSPX-"
 S2 = "fIbl82ugB74Mum7WvCMskf-oaowm"
 CLIENT_SECRET = S1 + S2
 
-# Naye Channel ka Permanent Refresh Token (Split)
+# Permanent Refresh Token (Split)
 T1 = "1//041dYY6lxy6uTCgYIARAAGAQSNwF-L9Ir"
 T2 = "R--r5ucH3l4KbFMp0BvUitFUR__eryf5dUQT"
 T3 = "KshkFXyw6s3nTFnJR_ngQHkmHGysnH4"
@@ -93,65 +93,82 @@ def sanitize_video(raw_file, output_file):
 
 def download_latest_video(account_info, uploaded_ids):
     username = account_info["username"]
-    url = f"https://www.tiktok.com/@{username}"
-    print(f"\n[+] Checking profile @{username} ...")
+    print(f"\n[+] Checking profile @{username} via API ...")
 
-    ydl_opts = {
-        'playlistend': 10,
-        'extract_flat': True,
-        'quiet': True,
-        'no_warnings': True,
-        'ignoreerrors': True,
-        'impersonate': 'chrome',
-        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
-    }
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    })
 
+    posts = []
+    # TikWM User API endpoint
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            data = ydl.extract_info(url, download=False)
-            if not data or 'entries' not in data:
-                print(f"[-] Could not read entries for @{username}")
-                return None
-            
-            entries = [e for e in data['entries'] if e]
-            for e in entries:
-                vid_id = str(e.get('id', ''))
-                if not vid_id or vid_id in uploaded_ids:
-                    continue
-
-                raw_file = f"temp_{vid_id}.mp4"
-                final_file = f"short_{vid_id}.mp4"
-                video_url = e.get('url') or f"https://www.tiktok.com/@{username}/video/{vid_id}"
-
-                print(f"[+] Downloading video: {vid_id} ...")
-                dl_opts = {
-                    'format': 'best[ext=mp4]/best',
-                    'outtmpl': raw_file,
-                    'quiet': False,
-                    'impersonate': 'chrome'
-                }
-                with yt_dlp.YoutubeDL(dl_opts) as dl:
-                    dl.download([video_url])
-
-                if os.path.exists(raw_file):
-                    print(f"[+] Encoding 9:16 Shorts format...")
-                    if sanitize_video(raw_file, final_file):
-                        if os.path.exists(raw_file):
-                            os.remove(raw_file)
-                    else:
-                        final_file = raw_file
-
-                    raw_title = e.get('title') or f"{account_info['category']} Tips"
-                    clean_title = re.sub(r'#\S+', '', raw_title).strip() or f"{account_info['category']} Tips"
-                    final_title = f"{clean_title[:80]} #Shorts"
-
-                    return {
-                        "id": vid_id,
-                        "file_path": final_file,
-                        "title": final_title
-                    }
+        api_url = f"https://www.tikwm.com/api/user/posts?unique_id={username}&count=15"
+        resp = session.get(api_url, timeout=25)
+        if resp.status_code == 200:
+            res_json = resp.json()
+            if res_json.get("code") == 0:
+                posts = res_json.get("data", {}).get("videos", [])
     except Exception as err:
-        print(f"[-] yt-dlp error for @{username}: {err}")
+        print(f"[-] API error for @{username}: {err}")
+
+    # Fallback endpoint
+    if not posts:
+        try:
+            feed_url = "https://www.tikwm.com/api/feed/user"
+            resp2 = session.post(feed_url, data={"unique_id": username, "count": 15}, timeout=25)
+            if resp2.status_code == 200:
+                res_json2 = resp2.json()
+                if res_json2.get("code") == 0:
+                    posts = res_json2.get("data", {}).get("videos", [])
+        except Exception as err:
+            print(f"[-] Fallback error for @{username}: {err}")
+
+    if not posts:
+        print(f"[-] No videos returned from API for @{username}")
+        return None
+
+    for post in posts:
+        vid_id = str(post.get("video_id", ""))
+        if not vid_id or vid_id in uploaded_ids:
+            continue
+
+        raw_file = f"temp_{vid_id}.mp4"
+        final_file = f"short_{vid_id}.mp4"
+
+        stream_url = post.get("play")
+        if not stream_url:
+            continue
+        if not stream_url.startswith("http"):
+            stream_url = f"https://www.tikwm.com{stream_url}"
+
+        print(f"[+] Downloading video: {vid_id} ...")
+        with session.get(stream_url, stream=True, timeout=60) as dl:
+            dl.raise_for_status()
+            with open(raw_file, "wb") as f:
+                for chunk in dl.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+
+        if os.path.exists(raw_file) and os.path.getsize(raw_file) > 10000:
+            print("[+] Sanitizing 9:16 Shorts format...")
+            if sanitize_video(raw_file, final_file):
+                if os.path.exists(raw_file):
+                    os.remove(raw_file)
+            else:
+                final_file = raw_file
+
+            raw_title = post.get("title", "").strip() or f"{account_info['category']} Tips"
+            clean_title = re.sub(r'#\S+', '', raw_title).strip() or f"{account_info['category']} Tips"
+            final_title = f"{clean_title[:80]} #Shorts"
+
+            return {
+                "id": vid_id,
+                "file_path": final_file,
+                "title": final_title
+            }
+
+    print(f"[-] All recent videos for @{username} are already uploaded.")
     return None
 
 def upload_to_youtube(yt, video_info, category_config):
@@ -165,7 +182,7 @@ def upload_to_youtube(yt, video_info, category_config):
         microsecond=0
     )
 
-    # Agar target time aane mein 10 minute se zyada waqt hai, to aaj schedule hoga
+    # Agar target waqt aane mein 10 minute se zyada waqt hai, to aaj schedule hoga
     if target_time > (now_pkt + datetime.timedelta(minutes=10)):
         scheduled_dt = target_time
         print(f"[+] Scheduling for TODAY at: {scheduled_dt.strftime('%I:%M %p PKT')}")
@@ -181,7 +198,7 @@ def upload_to_youtube(yt, video_info, category_config):
             "title": video_info["title"],
             "description": category_config["description"],
             "tags": category_config["tags"],
-            "categoryId": "27"  # Education Category
+            "categoryId": "27"  # Education
         },
         "status": {
             "privacyStatus": "private",
@@ -216,14 +233,14 @@ def main():
 
         video_data = download_latest_video(item, uploaded_ids)
         if not video_data:
-            print(f"[-] No new video found for {item['category']}")
+            print(f"[-] No new video for {item['category']}")
             continue
 
         upload_to_youtube(yt, video_data, item)
         append_uploaded_id(video_data["id"])
         uploaded_ids.add(video_data["id"])
 
-    print("\n[+] Tamam 3 categories ki Shorts process ho chuki hain!")
+    print("\n[+] Tamam categories process ho chuki hain!")
 
 if __name__ == "__main__":
     main()
