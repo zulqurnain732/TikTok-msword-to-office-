@@ -1,6 +1,5 @@
 import os
 import re
-import json
 import datetime
 import subprocess
 import pytz
@@ -99,8 +98,6 @@ def get_profile_video_ids(username):
         "Referer": "https://www.google.com/"
     }
     found_ids = []
-    
-    # Method A: Direct HTML Parse
     try:
         r = requests.get(url, headers=headers, timeout=20)
         if r.status_code == 200:
@@ -109,34 +106,66 @@ def get_profile_video_ids(username):
                 ids = re.findall(r'\"id\":\"(\d{15,22})\"', r.text)
             found_ids = list(dict.fromkeys(ids))
     except Exception as e:
-        print(f"[-] Web HTML fetch error: {e}")
-
-    # Method B: yt-dlp flat playlist extraction
-    if not found_ids:
-        cmd = [
-            "yt-dlp",
-            "--flat-playlist",
-            "--playlist-end", "10",
-            "--print", "%(id)s",
-            url
-        ]
-        res = subprocess.run(cmd, capture_output=True, text=True)
-        if res.returncode == 0 and res.stdout:
-            lines = [l.strip() for l in res.stdout.splitlines() if l.strip().isdigit()]
-            found_ids = list(dict.fromkeys(lines))
-
-    # Method C: TikWM public user query
-    if not found_ids:
-        try:
-            api_url = f"https://www.tikwm.com/api/user/posts?unique_id={username}&count=10"
-            res = requests.get(api_url, headers=headers, timeout=15).json()
-            if res.get("code") == 0:
-                vids = [str(x.get("video_id")) for x in res.get("data", {}).get("videos", []) if x.get("video_id")]
-                found_ids = list(dict.fromkeys(vids))
-        except Exception:
-            pass
+        print(f"[-] HTML fetch notice: {e}")
 
     return found_ids
+
+def download_tiktok_video_stream(video_url, output_path):
+    # 1. Cobalt API instances (TikTok no-watermark resolver)
+    cobalt_servers = [
+        "https://capi.oak.li/",
+        "https://api.co.rooot.gay/",
+        "https://cobalt-api.hyper.lol/",
+        "https://cobalt.synzr.space/"
+    ]
+    
+    for c_url in cobalt_servers:
+        try:
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0"
+            }
+            payload = {
+                "url": video_url,
+                "videoQuality": "720",
+                "filenamePattern": "basic"
+            }
+            r = requests.post(c_url, json=payload, headers=headers, timeout=25)
+            if r.status_code == 200:
+                stream_url = r.json().get("url")
+                if stream_url:
+                    with requests.get(stream_url, stream=True, timeout=90) as stream_req:
+                        stream_req.raise_for_status()
+                        with open(output_path, "wb") as f:
+                            for chunk in stream_req.iter_content(chunk_size=1024*1024):
+                                if chunk:
+                                    f.write(chunk)
+                    if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                        return True
+        except Exception:
+            continue
+
+    # 2. SSSTik resolver fallback
+    try:
+        ssstik_url = "https://ssstik.io/abc?url=dl"
+        s = requests.Session()
+        s.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        res = s.post(ssstik_url, data={"id": video_url, "locale": "en", "tt": "0"}, timeout=20)
+        matches = re.findall(r'href=[\'"](https?://[^\'"]+\.mp4[^\'"]*)[\'"]', res.text)
+        if matches:
+            dl_link = matches[0]
+            with s.get(dl_link, stream=True, timeout=90) as dl_req:
+                with open(output_path, "wb") as f:
+                    for chunk in dl_req.iter_content(chunk_size=1024*1024):
+                        if chunk:
+                            f.write(chunk)
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                return True
+    except Exception:
+        pass
+
+    return False
 
 def download_latest_video(account_info, uploaded_ids):
     username = account_info["username"]
@@ -155,36 +184,10 @@ def download_latest_video(account_info, uploaded_ids):
         final_file = f"short_{vid_id}.mp4"
         video_url = f"https://www.tiktok.com/@{username}/video/{vid_id}"
 
-        print(f"[+] Downloading video: {vid_id} ...")
+        print(f"[+] Downloading video: {vid_id} via API Resolver...")
+        success = download_tiktok_video_stream(video_url, raw_file)
 
-        # 1. Try yt-dlp first
-        dl_cmd = [
-            "yt-dlp",
-            "-f", "best[ext=mp4]/best",
-            "-o", raw_file,
-            video_url
-        ]
-        subprocess.run(dl_cmd)
-
-        # 2. Fallback to direct TikWM single video downloader
-        if not os.path.exists(raw_file) or os.path.getsize(raw_file) < 5000:
-            try:
-                single_api = "https://www.tikwm.com/api/"
-                r_single = requests.post(single_api, data={"url": video_url}, timeout=20).json()
-                if r_single.get("code") == 0:
-                    play_url = r_single.get("data", {}).get("play")
-                    if play_url:
-                        if not play_url.startswith("http"):
-                            play_url = f"https://www.tikwm.com{play_url}"
-                        with requests.get(play_url, stream=True, timeout=60) as dl:
-                            with open(raw_file, "wb") as f:
-                                for chunk in dl.iter_content(chunk_size=1024*1024):
-                                    if chunk:
-                                        f.write(chunk)
-            except Exception as e:
-                print(f"[-] Fallback download error: {e}")
-
-        if os.path.exists(raw_file) and os.path.getsize(raw_file) > 10000:
+        if success and os.path.exists(raw_file) and os.path.getsize(raw_file) > 10000:
             print("[+] Sanitizing 9:16 Shorts format...")
             if sanitize_video(raw_file, final_file):
                 if os.path.exists(raw_file):
