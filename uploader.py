@@ -4,9 +4,13 @@ import datetime
 import subprocess
 import pytz
 import requests
+import urllib3
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
+
+# Disable SSL verification warnings for third-party scrapers
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Split Credentials (GitHub Secret Scanner Bypass)
 P1 = "546480239670-"
@@ -113,86 +117,62 @@ def get_profile_video_ids(username):
 def download_tiktok_stream(username, vid_id, output_path):
     video_url = f"https://www.tiktok.com/@{username}/video/{vid_id}"
 
-    # Method 1: Tiklydown API (Fast direct no-watermark link)
+    # Method 1: Tiklydown API (SSL Verification Disabled for Domain Mismatch)
     try:
-        t_res = requests.get(f"https://api.tiklydown.eu.org/api/download?url={video_url}", timeout=20)
+        t_res = requests.get(
+            f"https://api.tiklydown.eu.org/api/download?url={video_url}",
+            timeout=15,
+            verify=False
+        )
         if t_res.status_code == 200:
             t_data = t_res.json()
             stream_url = t_data.get("video", {}).get("noWatermark") or t_data.get("video", {}).get("watermark")
             if stream_url:
-                with requests.get(stream_url, stream=True, timeout=90, headers={"User-Agent": "Mozilla/5.0"}) as r:
+                with requests.get(stream_url, stream=True, timeout=90, headers={"User-Agent": "Mozilla/5.0"}, verify=False) as r:
                     r.raise_for_status()
                     with open(output_path, "wb") as f:
                         for chunk in r.iter_content(chunk_size=1024*1024):
                             if chunk:
                                 f.write(chunk)
                 if os.path.exists(output_path) and os.path.getsize(output_path) > 20000:
+                    print("[+] Downloaded successfully via Tiklydown API.")
                     return True
     except Exception as e:
-        print(f"[-] Tiklydown notice: {e}")
+        print(f"[-] Tiklydown error: {e}")
 
-    # Method 2: Lovetik Ajax Resolver
+    # Method 2: tiktok_downloader Library Services (Snaptik / Tikmate / SSSTik)
     try:
-        l_res = requests.post("https://lovetik.com/api/ajax/search", data={"query": video_url}, timeout=20)
-        if l_res.status_code == 200:
-            l_data = l_res.json()
-            links = l_data.get("links", [])
-            stream_url = None
-            for link_item in links:
-                if link_item.get("a") == "download" or "nowatermark" in link_item.get("t", "").lower():
-                    stream_url = link_item.get("d") or link_item.get("b")
-                    if stream_url:
-                        break
-            if not stream_url and links:
-                stream_url = links[0].get("d") or links[0].get("b")
-
-            if stream_url:
-                with requests.get(stream_url, stream=True, timeout=90, headers={"User-Agent": "Mozilla/5.0"}) as r:
-                    r.raise_for_status()
-                    with open(output_path, "wb") as f:
-                        for chunk in r.iter_content(chunk_size=1024*1024):
-                            if chunk:
-                                f.write(chunk)
-                if os.path.exists(output_path) and os.path.getsize(output_path) > 20000:
-                    return True
+        from tiktok_downloader import snaptik, tikwm, ssstik
+        for service_func, s_name in [(snaptik, "Snaptik"), (tikwm, "TikWM"), (ssstik, "SSSTik")]:
+            try:
+                res = service_func(video_url)
+                if res:
+                    for media in res:
+                        if getattr(media, "type", "") == "video":
+                            media.download(output_path)
+                            if os.path.exists(output_path) and os.path.getsize(output_path) > 20000:
+                                print(f"[+] Downloaded successfully via {s_name}.")
+                                return True
+            except Exception:
+                continue
+    except ImportError:
+        pass
     except Exception as e:
-        print(f"[-] Lovetik notice: {e}")
+        print(f"[-] tiktok_downloader library notice: {e}")
 
-    # Method 3: TikWM API with explicit browser headers
-    try:
-        tw_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": "https://www.tikwm.com/",
-            "Origin": "https://www.tikwm.com"
-        }
-        tw_res = requests.post("https://www.tikwm.com/api/", data={"url": video_url, "hd": 1}, headers=tw_headers, timeout=20)
-        if tw_res.status_code == 200:
-            tw_json = tw_res.json()
-            if tw_json.get("code") == 0:
-                play_url = tw_json.get("data", {}).get("play")
-                if play_url:
-                    if not play_url.startswith("http"):
-                        play_url = f"https://www.tikwm.com{play_url}"
-                    with requests.get(play_url, stream=True, timeout=90, headers=tw_headers) as r:
-                        r.raise_for_status()
-                        with open(output_path, "wb") as f:
-                            for chunk in r.iter_content(chunk_size=1024*1024):
-                                if chunk:
-                                    f.write(chunk)
-                    if os.path.exists(output_path) and os.path.getsize(output_path) > 20000:
-                        return True
-    except Exception as e:
-        print(f"[-] TikWM notice: {e}")
-
-    # Method 4: Cobalt Multi-Instances
-    cobalt_hosts = ["https://capi.oak.li/", "https://cobalt-api.hyper.lol/", "https://cobalt.synzr.space/"]
+    # Method 3: Cobalt Multi-Instances
+    cobalt_hosts = [
+        "https://capi.oak.li/",
+        "https://cobalt-api.hyper.lol/",
+        "https://cobalt.synzr.space/"
+    ]
     for c_host in cobalt_hosts:
         try:
             c_res = requests.post(
                 c_host,
                 json={"url": video_url, "videoQuality": "720", "filenamePattern": "basic"},
                 headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"},
-                timeout=20
+                timeout=15
             )
             if c_res.status_code == 200:
                 c_stream = c_res.json().get("url")
@@ -204,6 +184,7 @@ def download_tiktok_stream(username, vid_id, output_path):
                                 if chunk:
                                     f.write(chunk)
                     if os.path.exists(output_path) and os.path.getsize(output_path) > 20000:
+                        print("[+] Downloaded successfully via Cobalt.")
                         return True
         except Exception:
             continue
@@ -220,7 +201,7 @@ def download_latest_video(account_info, uploaded_ids):
         return None
 
     for vid_id in video_ids:
-        # Strict Duplicate Check: Agar pehle upload hui hai to chhor do
+        # Duplicate Prevention: Agar ID pehle se list mein hai to skip karo
         if vid_id in uploaded_ids:
             continue
 
@@ -315,7 +296,7 @@ def main():
             continue
 
         upload_to_youtube(yt, video_data, item)
-        # Upload complete hone ke baad hi ID save hogi taake duplicate na ho
+        # Kamyabi se upload hone ke baad hi ID add hogi taake duplicate na ho
         append_uploaded_id(video_data["id"])
         uploaded_ids.add(video_data["id"])
 
