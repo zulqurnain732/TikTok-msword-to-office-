@@ -106,36 +106,59 @@ def get_profile_video_ids(username):
                 ids = re.findall(r'\"id\":\"(\d{15,22})\"', r.text)
             found_ids = list(dict.fromkeys(ids))
     except Exception as e:
-        print(f"[-] HTML fetch notice: {e}")
+        print(f"[-] HTML parse notice: {e}")
+
+    # Fallback via TikWM user API
+    if not found_ids:
+        try:
+            api_res = requests.get(f"https://www.tikwm.com/api/user/posts?unique_id={username}&count=15", headers=headers, timeout=15).json()
+            if api_res.get("code") == 0:
+                v_list = api_res.get("data", {}).get("videos", [])
+                found_ids = [str(v.get("video_id")) for v in v_list if v.get("video_id")]
+        except Exception:
+            pass
 
     return found_ids
 
-def download_tiktok_video_stream(video_url, output_path):
-    # 1. Cobalt API instances (TikTok no-watermark resolver)
+def download_tiktok_video(video_url, output_path):
+    # Method 1: TikWM official API resolver (No-watermark MP4)
+    try:
+        api_url = "https://www.tikwm.com/api/"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json"
+        }
+        res = requests.post(api_url, data={"url": video_url, "hd": 1}, headers=headers, timeout=25).json()
+        if res.get("code") == 0:
+            play_url = res.get("data", {}).get("play") or res.get("data", {}).get("wmplay")
+            if play_url:
+                if not play_url.startswith("http"):
+                    play_url = f"https://www.tikwm.com{play_url}"
+                with requests.get(play_url, stream=True, timeout=90) as stream_req:
+                    stream_req.raise_for_status()
+                    with open(output_path, "wb") as f:
+                        for chunk in stream_req.iter_content(chunk_size=1024*1024):
+                            if chunk:
+                                f.write(chunk)
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                    return True
+    except Exception as e:
+        print(f"[-] TikWM download error: {e}")
+
+    # Method 2: Cobalt community resolvers fallback
     cobalt_servers = [
         "https://capi.oak.li/",
         "https://api.co.rooot.gay/",
-        "https://cobalt-api.hyper.lol/",
-        "https://cobalt.synzr.space/"
+        "https://cobalt-api.hyper.lol/"
     ]
-    
     for c_url in cobalt_servers:
         try:
-            headers = {
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-                "User-Agent": "Mozilla/5.0"
-            }
-            payload = {
-                "url": video_url,
-                "videoQuality": "720",
-                "filenamePattern": "basic"
-            }
-            r = requests.post(c_url, json=payload, headers=headers, timeout=25)
-            if r.status_code == 200:
-                stream_url = r.json().get("url")
-                if stream_url:
-                    with requests.get(stream_url, stream=True, timeout=90) as stream_req:
+            payload = {"url": video_url, "videoQuality": "720", "filenamePattern": "basic"}
+            c_res = requests.post(c_url, json=payload, headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"}, timeout=20)
+            if c_res.status_code == 200:
+                s_url = c_res.json().get("url")
+                if s_url:
+                    with requests.get(s_url, stream=True, timeout=90) as stream_req:
                         stream_req.raise_for_status()
                         with open(output_path, "wb") as f:
                             for chunk in stream_req.iter_content(chunk_size=1024*1024):
@@ -145,25 +168,6 @@ def download_tiktok_video_stream(video_url, output_path):
                         return True
         except Exception:
             continue
-
-    # 2. SSSTik resolver fallback
-    try:
-        ssstik_url = "https://ssstik.io/abc?url=dl"
-        s = requests.Session()
-        s.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-        res = s.post(ssstik_url, data={"id": video_url, "locale": "en", "tt": "0"}, timeout=20)
-        matches = re.findall(r'href=[\'"](https?://[^\'"]+\.mp4[^\'"]*)[\'"]', res.text)
-        if matches:
-            dl_link = matches[0]
-            with s.get(dl_link, stream=True, timeout=90) as dl_req:
-                with open(output_path, "wb") as f:
-                    for chunk in dl_req.iter_content(chunk_size=1024*1024):
-                        if chunk:
-                            f.write(chunk)
-            if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
-                return True
-    except Exception:
-        pass
 
     return False
 
@@ -177,6 +181,7 @@ def download_latest_video(account_info, uploaded_ids):
         return None
 
     for vid_id in video_ids:
+        # Duplicate check: agar yeh video pehle upload ho chuki hai to skip karo
         if vid_id in uploaded_ids:
             continue
 
@@ -184,11 +189,11 @@ def download_latest_video(account_info, uploaded_ids):
         final_file = f"short_{vid_id}.mp4"
         video_url = f"https://www.tiktok.com/@{username}/video/{vid_id}"
 
-        print(f"[+] Downloading video: {vid_id} via API Resolver...")
-        success = download_tiktok_video_stream(video_url, raw_file)
+        print(f"[+] Found fresh un-uploaded video: {vid_id} ... Downloading ...")
+        success = download_tiktok_video(video_url, raw_file)
 
         if success and os.path.exists(raw_file) and os.path.getsize(raw_file) > 10000:
-            print("[+] Sanitizing 9:16 Shorts format...")
+            print("[+] Sanitizing to 9:16 Shorts format...")
             if sanitize_video(raw_file, final_file):
                 if os.path.exists(raw_file):
                     os.remove(raw_file)
@@ -203,7 +208,7 @@ def download_latest_video(account_info, uploaded_ids):
                 "title": title
             }
 
-    print(f"[-] All videos for @{username} already uploaded.")
+    print(f"[-] All available videos for @{username} are already in uploaded_ids.txt.")
     return None
 
 def upload_to_youtube(yt, video_info, category_config):
@@ -222,7 +227,7 @@ def upload_to_youtube(yt, video_info, category_config):
         print(f"[+] Scheduling for TODAY at: {scheduled_dt.strftime('%I:%M %p PKT')}")
     else:
         scheduled_dt = target_time + datetime.timedelta(days=1)
-        print(f"[+] Target time already passed for today. Scheduling for TOMORROW at: {scheduled_dt.strftime('%d-%b %I:%M %p PKT')}")
+        print(f"[+] Target time passed today. Scheduling for TOMORROW at: {scheduled_dt.strftime('%d-%b %I:%M %p PKT')}")
 
     iso_publish_time = scheduled_dt.astimezone(pytz.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
@@ -270,6 +275,7 @@ def main():
             continue
 
         upload_to_youtube(yt, video_data, item)
+        # Kamyabi se upload hone ke baad hi ID save hogi
         append_uploaded_id(video_data["id"])
         uploaded_ids.add(video_data["id"])
 
