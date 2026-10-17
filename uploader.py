@@ -18,7 +18,7 @@ S1 = "GOCSPX-"
 S2 = "fIbl82ugB74Mum7WvCMskf-oaowm"
 CLIENT_SECRET = S1 + S2
 
-# Naye Channel ka Permanent Refresh Token (Split)
+# Permanent Refresh Token (Split)
 T1 = "1//041dYY6lxy6uTCgYIARAAGAQSNwF-L9Ir"
 T2 = "R--r5ucH3l4KbFMp0BvUitFUR__eryf5dUQT"
 T3 = "KshkFXyw6s3nTFnJR_ngQHkmHGysnH4"
@@ -94,7 +94,7 @@ def sanitize_video(raw_file, output_file):
 def get_profile_video_ids(username):
     url = f"https://www.tiktok.com/@{username}"
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
         "Referer": "https://www.google.com/"
     }
     found_ids = []
@@ -110,60 +110,103 @@ def get_profile_video_ids(username):
 
     return found_ids
 
-def download_tiktok_stream(vid_id, output_path):
-    headers = {
-        "User-Agent": "TikTok 26.2.0 rv:262018 (iPhone; iOS 14.4.2; en_US) Cronet",
-        "Accept": "application/json"
-    }
+def download_tiktok_stream(username, vid_id, output_path):
+    video_url = f"https://www.tiktok.com/@{username}/video/{vid_id}"
 
-    # Method 1: Official TikTok Mobile App Core Feed API (No Cloudflare Block)
+    # Method 1: Tiklydown API (Fast direct no-watermark link)
     try:
-        api_url = f"https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/feed/?aweme_id={vid_id}"
-        r = requests.get(api_url, headers=headers, timeout=20)
-        if r.status_code == 200:
-            data = r.json()
-            aweme_list = data.get("aweme_list", [])
-            if aweme_list:
-                video_obj = aweme_list[0].get("video", {})
-                url_list = (video_obj.get("play_addr", {}) or video_obj.get("download_addr", {})).get("url_list", [])
-                for stream_url in url_list:
-                    dl_headers = {
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                        "Referer": "https://www.tiktok.com/"
-                    }
-                    with requests.get(stream_url, headers=dl_headers, stream=True, timeout=90, allow_redirects=True) as stream_req:
-                        if stream_req.status_code == 200:
-                            with open(output_path, "wb") as f:
-                                for chunk in stream_req.iter_content(chunk_size=1024*1024):
-                                    if chunk:
-                                        f.write(chunk)
-                            if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
-                                return True
-    except Exception as e:
-        print(f"[-] TikTok Mobile Feed API error: {e}")
-
-    # Method 2: Fallback Web Stream Resolver
-    try:
-        video_url = f"https://www.tiktok.com/@i/video/{vid_id}"
-        c_res = requests.post(
-            "https://capi.oak.li/",
-            json={"url": video_url, "videoQuality": "720", "filenamePattern": "basic"},
-            headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"},
-            timeout=20
-        )
-        if c_res.status_code == 200:
-            s_url = c_res.json().get("url")
-            if s_url:
-                with requests.get(s_url, stream=True, timeout=90) as stream_req:
-                    stream_req.raise_for_status()
+        t_res = requests.get(f"https://api.tiklydown.eu.org/api/download?url={video_url}", timeout=20)
+        if t_res.status_code == 200:
+            t_data = t_res.json()
+            stream_url = t_data.get("video", {}).get("noWatermark") or t_data.get("video", {}).get("watermark")
+            if stream_url:
+                with requests.get(stream_url, stream=True, timeout=90, headers={"User-Agent": "Mozilla/5.0"}) as r:
+                    r.raise_for_status()
                     with open(output_path, "wb") as f:
-                        for chunk in stream_req.iter_content(chunk_size=1024*1024):
+                        for chunk in r.iter_content(chunk_size=1024*1024):
                             if chunk:
                                 f.write(chunk)
-                if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 20000:
                     return True
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[-] Tiklydown notice: {e}")
+
+    # Method 2: Lovetik Ajax Resolver
+    try:
+        l_res = requests.post("https://lovetik.com/api/ajax/search", data={"query": video_url}, timeout=20)
+        if l_res.status_code == 200:
+            l_data = l_res.json()
+            links = l_data.get("links", [])
+            stream_url = None
+            for link_item in links:
+                if link_item.get("a") == "download" or "nowatermark" in link_item.get("t", "").lower():
+                    stream_url = link_item.get("d") or link_item.get("b")
+                    if stream_url:
+                        break
+            if not stream_url and links:
+                stream_url = links[0].get("d") or links[0].get("b")
+
+            if stream_url:
+                with requests.get(stream_url, stream=True, timeout=90, headers={"User-Agent": "Mozilla/5.0"}) as r:
+                    r.raise_for_status()
+                    with open(output_path, "wb") as f:
+                        for chunk in r.iter_content(chunk_size=1024*1024):
+                            if chunk:
+                                f.write(chunk)
+                if os.path.exists(output_path) and os.path.getsize(output_path) > 20000:
+                    return True
+    except Exception as e:
+        print(f"[-] Lovetik notice: {e}")
+
+    # Method 3: TikWM API with explicit browser headers
+    try:
+        tw_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://www.tikwm.com/",
+            "Origin": "https://www.tikwm.com"
+        }
+        tw_res = requests.post("https://www.tikwm.com/api/", data={"url": video_url, "hd": 1}, headers=tw_headers, timeout=20)
+        if tw_res.status_code == 200:
+            tw_json = tw_res.json()
+            if tw_json.get("code") == 0:
+                play_url = tw_json.get("data", {}).get("play")
+                if play_url:
+                    if not play_url.startswith("http"):
+                        play_url = f"https://www.tikwm.com{play_url}"
+                    with requests.get(play_url, stream=True, timeout=90, headers=tw_headers) as r:
+                        r.raise_for_status()
+                        with open(output_path, "wb") as f:
+                            for chunk in r.iter_content(chunk_size=1024*1024):
+                                if chunk:
+                                    f.write(chunk)
+                    if os.path.exists(output_path) and os.path.getsize(output_path) > 20000:
+                        return True
+    except Exception as e:
+        print(f"[-] TikWM notice: {e}")
+
+    # Method 4: Cobalt Multi-Instances
+    cobalt_hosts = ["https://capi.oak.li/", "https://cobalt-api.hyper.lol/", "https://cobalt.synzr.space/"]
+    for c_host in cobalt_hosts:
+        try:
+            c_res = requests.post(
+                c_host,
+                json={"url": video_url, "videoQuality": "720", "filenamePattern": "basic"},
+                headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"},
+                timeout=20
+            )
+            if c_res.status_code == 200:
+                c_stream = c_res.json().get("url")
+                if c_stream:
+                    with requests.get(c_stream, stream=True, timeout=90) as r:
+                        r.raise_for_status()
+                        with open(output_path, "wb") as f:
+                            for chunk in r.iter_content(chunk_size=1024*1024):
+                                if chunk:
+                                    f.write(chunk)
+                    if os.path.exists(output_path) and os.path.getsize(output_path) > 20000:
+                        return True
+        except Exception:
+            continue
 
     return False
 
@@ -177,7 +220,7 @@ def download_latest_video(account_info, uploaded_ids):
         return None
 
     for vid_id in video_ids:
-        # Duplicate Protection: Pehle se upload shuda video ko dobara nahi chhayenge[span_2](start_span)[span_2](end_span)
+        # Strict Duplicate Check: Agar pehle upload hui hai to chhor do
         if vid_id in uploaded_ids:
             continue
 
@@ -185,10 +228,10 @@ def download_latest_video(account_info, uploaded_ids):
         final_file = f"short_{vid_id}.mp4"
 
         print(f"[+] Found fresh un-uploaded video: {vid_id} ... Downloading ...")
-        success = download_tiktok_stream(vid_id, raw_file)
+        success = download_tiktok_stream(username, vid_id, raw_file)
 
-        if success and os.path.exists(raw_file) and os.path.getsize(raw_file) > 10000:
-            print("[+] Sanitizing to 9:16 Shorts format...")
+        if success and os.path.exists(raw_file) and os.path.getsize(raw_file) > 20000:
+            print("[+] Sanitizing to 9:16 Shorts format via FFmpeg...")
             if sanitize_video(raw_file, final_file):
                 if os.path.exists(raw_file):
                     os.remove(raw_file)
@@ -203,7 +246,7 @@ def download_latest_video(account_info, uploaded_ids):
                 "title": title
             }
         else:
-            print(f"[-] Download stream failed for {vid_id}, checking next video...")
+            print(f"[-] Download failed for {vid_id}, checking next available video...")
 
     print(f"[-] No new un-uploaded videos available for @{username}.")
     return None
@@ -233,7 +276,7 @@ def upload_to_youtube(yt, video_info, category_config):
             "title": video_info["title"],
             "description": category_config["description"],
             "tags": category_config["tags"],
-            "categoryId": "27"  # Education[span_3](start_span)[span_3](end_span)
+            "categoryId": "27"  # Education
         },
         "status": {
             "privacyStatus": "private",
@@ -272,7 +315,7 @@ def main():
             continue
 
         upload_to_youtube(yt, video_data, item)
-        # Upload complete hone ke baad hi ID save hogi taake duplicate na ho[span_4](start_span)[span_4](end_span)
+        # Upload complete hone ke baad hi ID save hogi taake duplicate na ho
         append_uploaded_id(video_data["id"])
         uploaded_ids.add(video_data["id"])
 
