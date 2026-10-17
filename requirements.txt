@@ -1,8 +1,6 @@
-yt-dlp[default,curl-cffi]
-tiktok-downloader
+curl-cffi
 google-api-python-client
 google-auth-httplib2
 google-auth-oauthlib
 requests
 pytz
-urllib3
