@@ -1,0 +1,46 @@
+name: Daily Multi-Category Shorts Sync
+
+on:
+  schedule:
+    # Daily at 3:00 PM PKT (10:00 AM UTC) taake 4:30 PM se pehle sab schedule ho jayein
+    - cron: '0 10 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync_and_upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python Runtime
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python Requirements
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Multi-Category Uploader
+        run: |
+          python uploader.py
+
+      - name: Commit Uploaded History
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -f uploaded_ids.txt ]; then
+            git add uploaded_ids.txt
+            git commit -m "Update uploaded IDs history" || echo "No changes to commit"
+            git push
+          fi
