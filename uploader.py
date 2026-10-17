@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import datetime
 import subprocess
 import pytz
@@ -8,7 +9,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-# Split credentials to bypass GitHub Secret Scanner
+# Split Credentials (GitHub Secret Scanner Bypass)
 P1 = "546480239670-"
 P2 = "ogm0nio8rj9mmq3ra4hiprs85h1lpods"
 P3 = ".apps.googleusercontent.com"
@@ -91,64 +92,97 @@ def sanitize_video(raw_file, output_file):
     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return os.path.exists(output_file) and os.path.getsize(output_file) > 10000
 
+def get_profile_video_ids(username):
+    url = f"https://www.tiktok.com/@{username}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Referer": "https://www.google.com/"
+    }
+    found_ids = []
+    
+    # Method A: Direct HTML Parse
+    try:
+        r = requests.get(url, headers=headers, timeout=20)
+        if r.status_code == 200:
+            ids = re.findall(r'video\/(\d{15,22})', r.text)
+            if not ids:
+                ids = re.findall(r'\"id\":\"(\d{15,22})\"', r.text)
+            found_ids = list(dict.fromkeys(ids))
+    except Exception as e:
+        print(f"[-] Web HTML fetch error: {e}")
+
+    # Method B: yt-dlp flat playlist extraction
+    if not found_ids:
+        cmd = [
+            "yt-dlp",
+            "--flat-playlist",
+            "--playlist-end", "10",
+            "--print", "%(id)s",
+            url
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode == 0 and res.stdout:
+            lines = [l.strip() for l in res.stdout.splitlines() if l.strip().isdigit()]
+            found_ids = list(dict.fromkeys(lines))
+
+    # Method C: TikWM public user query
+    if not found_ids:
+        try:
+            api_url = f"https://www.tikwm.com/api/user/posts?unique_id={username}&count=10"
+            res = requests.get(api_url, headers=headers, timeout=15).json()
+            if res.get("code") == 0:
+                vids = [str(x.get("video_id")) for x in res.get("data", {}).get("videos", []) if x.get("video_id")]
+                found_ids = list(dict.fromkeys(vids))
+        except Exception:
+            pass
+
+    return found_ids
+
 def download_latest_video(account_info, uploaded_ids):
     username = account_info["username"]
-    print(f"\n[+] Checking profile @{username} via API ...")
+    print(f"\n[+] Checking profile @{username} ...")
 
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-    })
-
-    posts = []
-    # TikWM User API endpoint
-    try:
-        api_url = f"https://www.tikwm.com/api/user/posts?unique_id={username}&count=15"
-        resp = session.get(api_url, timeout=25)
-        if resp.status_code == 200:
-            res_json = resp.json()
-            if res_json.get("code") == 0:
-                posts = res_json.get("data", {}).get("videos", [])
-    except Exception as err:
-        print(f"[-] API error for @{username}: {err}")
-
-    # Fallback endpoint
-    if not posts:
-        try:
-            feed_url = "https://www.tikwm.com/api/feed/user"
-            resp2 = session.post(feed_url, data={"unique_id": username, "count": 15}, timeout=25)
-            if resp2.status_code == 200:
-                res_json2 = resp2.json()
-                if res_json2.get("code") == 0:
-                    posts = res_json2.get("data", {}).get("videos", [])
-        except Exception as err:
-            print(f"[-] Fallback error for @{username}: {err}")
-
-    if not posts:
-        print(f"[-] No videos returned from API for @{username}")
+    video_ids = get_profile_video_ids(username)
+    if not video_ids:
+        print(f"[-] No videos found on profile @{username}")
         return None
 
-    for post in posts:
-        vid_id = str(post.get("video_id", ""))
-        if not vid_id or vid_id in uploaded_ids:
+    for vid_id in video_ids:
+        if vid_id in uploaded_ids:
             continue
 
         raw_file = f"temp_{vid_id}.mp4"
         final_file = f"short_{vid_id}.mp4"
-
-        stream_url = post.get("play")
-        if not stream_url:
-            continue
-        if not stream_url.startswith("http"):
-            stream_url = f"https://www.tikwm.com{stream_url}"
+        video_url = f"https://www.tiktok.com/@{username}/video/{vid_id}"
 
         print(f"[+] Downloading video: {vid_id} ...")
-        with session.get(stream_url, stream=True, timeout=60) as dl:
-            dl.raise_for_status()
-            with open(raw_file, "wb") as f:
-                for chunk in dl.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        f.write(chunk)
+
+        # 1. Try yt-dlp first
+        dl_cmd = [
+            "yt-dlp",
+            "-f", "best[ext=mp4]/best",
+            "-o", raw_file,
+            video_url
+        ]
+        subprocess.run(dl_cmd)
+
+        # 2. Fallback to direct TikWM single video downloader
+        if not os.path.exists(raw_file) or os.path.getsize(raw_file) < 5000:
+            try:
+                single_api = "https://www.tikwm.com/api/"
+                r_single = requests.post(single_api, data={"url": video_url}, timeout=20).json()
+                if r_single.get("code") == 0:
+                    play_url = r_single.get("data", {}).get("play")
+                    if play_url:
+                        if not play_url.startswith("http"):
+                            play_url = f"https://www.tikwm.com{play_url}"
+                        with requests.get(play_url, stream=True, timeout=60) as dl:
+                            with open(raw_file, "wb") as f:
+                                for chunk in dl.iter_content(chunk_size=1024*1024):
+                                    if chunk:
+                                        f.write(chunk)
+            except Exception as e:
+                print(f"[-] Fallback download error: {e}")
 
         if os.path.exists(raw_file) and os.path.getsize(raw_file) > 10000:
             print("[+] Sanitizing 9:16 Shorts format...")
@@ -158,17 +192,15 @@ def download_latest_video(account_info, uploaded_ids):
             else:
                 final_file = raw_file
 
-            raw_title = post.get("title", "").strip() or f"{account_info['category']} Tips"
-            clean_title = re.sub(r'#\S+', '', raw_title).strip() or f"{account_info['category']} Tips"
-            final_title = f"{clean_title[:80]} #Shorts"
+            title = f"{account_info['category']} Quick Tips #Shorts"
 
             return {
                 "id": vid_id,
                 "file_path": final_file,
-                "title": final_title
+                "title": title
             }
 
-    print(f"[-] All recent videos for @{username} are already uploaded.")
+    print(f"[-] All videos for @{username} already uploaded.")
     return None
 
 def upload_to_youtube(yt, video_info, category_config):
@@ -182,12 +214,10 @@ def upload_to_youtube(yt, video_info, category_config):
         microsecond=0
     )
 
-    # Agar target waqt aane mein 10 minute se zyada waqt hai, to aaj schedule hoga
     if target_time > (now_pkt + datetime.timedelta(minutes=10)):
         scheduled_dt = target_time
         print(f"[+] Scheduling for TODAY at: {scheduled_dt.strftime('%I:%M %p PKT')}")
     else:
-        # Agar aaj ka waqt nikal chuka hai to kal ke usi time schedule hoga
         scheduled_dt = target_time + datetime.timedelta(days=1)
         print(f"[+] Target time already passed for today. Scheduling for TOMORROW at: {scheduled_dt.strftime('%d-%b %I:%M %p PKT')}")
 
