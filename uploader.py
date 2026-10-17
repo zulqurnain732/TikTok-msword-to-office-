@@ -18,7 +18,7 @@ S1 = "GOCSPX-"
 S2 = "fIbl82ugB74Mum7WvCMskf-oaowm"
 CLIENT_SECRET = S1 + S2
 
-# Permanent Refresh Token (Split)
+# Naye Channel ka Permanent Refresh Token (Split)
 T1 = "1//041dYY6lxy6uTCgYIARAAGAQSNwF-L9Ir"
 T2 = "R--r5ucH3l4KbFMp0BvUitFUR__eryf5dUQT"
 T3 = "KshkFXyw6s3nTFnJR_ngQHkmHGysnH4"
@@ -110,55 +110,51 @@ def get_profile_video_ids(username):
 
     return found_ids
 
-def download_tiktok_stream(video_url, output_path):
-    # Method 1: yt-dlp via Mobile App Internal API
-    try:
-        cmd = [
-            "yt-dlp",
-            "--extractor-args", "tiktok:api_hostname=api22-core-c-useast1a.tiktokv.com",
-            "--user-agent", "okhttp/3.10.0.1",
-            "-f", "b/best",
-            "-o", output_path,
-            video_url
-        ]
-        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if res.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
-            return True
-    except Exception:
-        pass
+def download_tiktok_stream(vid_id, output_path):
+    headers = {
+        "User-Agent": "TikTok 26.2.0 rv:262018 (iPhone; iOS 14.4.2; en_US) Cronet",
+        "Accept": "application/json"
+    }
 
-    # Method 2: TikWM Mobile Backend API
+    # Method 1: Official TikTok Mobile App Core Feed API (No Cloudflare Block)
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            "Accept": "application/json"
-        }
-        res = requests.post("https://api2.tikwm.com/api/", data={"url": video_url, "hd": 1}, headers=headers, timeout=20).json()
-        if res.get("code") == 0:
-            stream_url = res.get("data", {}).get("play")
-            if stream_url:
-                if not stream_url.startswith("http"):
-                    stream_url = f"https://api2.tikwm.com{stream_url}"
-                with requests.get(stream_url, stream=True, timeout=90) as stream_req:
-                    stream_req.raise_for_status()
-                    with open(output_path, "wb") as f:
-                        for chunk in stream_req.iter_content(chunk_size=1024*1024):
-                            if chunk:
-                                f.write(chunk)
-                if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
-                    return True
-    except Exception:
-        pass
+        api_url = f"https://api16-normal-c-useast1a.tiktokv.com/aweme/v1/feed/?aweme_id={vid_id}"
+        r = requests.get(api_url, headers=headers, timeout=20)
+        if r.status_code == 200:
+            data = r.json()
+            aweme_list = data.get("aweme_list", [])
+            if aweme_list:
+                video_obj = aweme_list[0].get("video", {})
+                url_list = (video_obj.get("play_addr", {}) or video_obj.get("download_addr", {})).get("url_list", [])
+                for stream_url in url_list:
+                    dl_headers = {
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        "Referer": "https://www.tiktok.com/"
+                    }
+                    with requests.get(stream_url, headers=dl_headers, stream=True, timeout=90, allow_redirects=True) as stream_req:
+                        if stream_req.status_code == 200:
+                            with open(output_path, "wb") as f:
+                                for chunk in stream_req.iter_content(chunk_size=1024*1024):
+                                    if chunk:
+                                        f.write(chunk)
+                            if os.path.exists(output_path) and os.path.getsize(output_path) > 10000:
+                                return True
+    except Exception as e:
+        print(f"[-] TikTok Mobile Feed API error: {e}")
 
-    # Method 3: Direct TikWM Web Query
+    # Method 2: Fallback Web Stream Resolver
     try:
-        res = requests.get(f"https://www.tikwm.com/api/?url={video_url}", timeout=20).json()
-        if res.get("code") == 0:
-            stream_url = res.get("data", {}).get("play")
-            if stream_url:
-                if not stream_url.startswith("http"):
-                    stream_url = f"https://www.tikwm.com{stream_url}"
-                with requests.get(stream_url, stream=True, timeout=90) as stream_req:
+        video_url = f"https://www.tiktok.com/@i/video/{vid_id}"
+        c_res = requests.post(
+            "https://capi.oak.li/",
+            json={"url": video_url, "videoQuality": "720", "filenamePattern": "basic"},
+            headers={"Accept": "application/json", "User-Agent": "Mozilla/5.0"},
+            timeout=20
+        )
+        if c_res.status_code == 200:
+            s_url = c_res.json().get("url")
+            if s_url:
+                with requests.get(s_url, stream=True, timeout=90) as stream_req:
                     stream_req.raise_for_status()
                     with open(output_path, "wb") as f:
                         for chunk in stream_req.iter_content(chunk_size=1024*1024):
@@ -181,16 +177,15 @@ def download_latest_video(account_info, uploaded_ids):
         return None
 
     for vid_id in video_ids:
-        # Duplicate protection check[span_1](start_span)[span_1](end_span)
+        # Duplicate Protection: Pehle se upload shuda video ko dobara nahi chhayenge[span_2](start_span)[span_2](end_span)
         if vid_id in uploaded_ids:
             continue
 
         raw_file = f"temp_{vid_id}.mp4"
         final_file = f"short_{vid_id}.mp4"
-        video_url = f"https://www.tiktok.com/@{username}/video/{vid_id}"
 
         print(f"[+] Found fresh un-uploaded video: {vid_id} ... Downloading ...")
-        success = download_tiktok_stream(video_url, raw_file)
+        success = download_tiktok_stream(vid_id, raw_file)
 
         if success and os.path.exists(raw_file) and os.path.getsize(raw_file) > 10000:
             print("[+] Sanitizing to 9:16 Shorts format...")
@@ -208,9 +203,9 @@ def download_latest_video(account_info, uploaded_ids):
                 "title": title
             }
         else:
-            print(f"[-] Download stream failed for {vid_id}, trying next video...")
+            print(f"[-] Download stream failed for {vid_id}, checking next video...")
 
-    print(f"[-] No valid un-uploaded video could be processed for @{username}.")
+    print(f"[-] No new un-uploaded videos available for @{username}.")
     return None
 
 def upload_to_youtube(yt, video_info, category_config):
@@ -238,7 +233,7 @@ def upload_to_youtube(yt, video_info, category_config):
             "title": video_info["title"],
             "description": category_config["description"],
             "tags": category_config["tags"],
-            "categoryId": "27"  # Education[span_2](start_span)[span_2](end_span)
+            "categoryId": "27"  # Education[span_3](start_span)[span_3](end_span)
         },
         "status": {
             "privacyStatus": "private",
@@ -277,7 +272,7 @@ def main():
             continue
 
         upload_to_youtube(yt, video_data, item)
-        # Kamyabi se upload hone ke baad hi ID save hogi taake duplicate na ho[span_3](start_span)[span_3](end_span)
+        # Upload complete hone ke baad hi ID save hogi taake duplicate na ho[span_4](start_span)[span_4](end_span)
         append_uploaded_id(video_data["id"])
         uploaded_ids.add(video_data["id"])
 
